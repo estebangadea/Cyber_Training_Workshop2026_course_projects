@@ -30,8 +30,14 @@ if q.ndim == 3:
 nsteps_saved, ndof = q.shape
 nchain = ndof // 2
 
-p = get_default_params(nchain=nchain, dimer1=0.095665, lattice_ang=6.0, hartreeu=0.0)
-boxl = p["boxl"]
+p = get_default_params(nchain=nchain, hartreeu=0.0)   # dimer1/lattice_ang args are irrelevant here --
+                                                        # only the lattice-independent constants (hop,
+                                                        # hopslope, req, pref, p, fxcalpha, fxcgamma,
+                                                        # n_near) are used below.
+boxl = nchain * (q[0, 2] - q[0, 0])   # ring circumference, read directly from the t=0 geometry --
+                                       # robust to whatever lattice_ang this run actually used (unlike
+                                       # a hardcoded get_default_params(lattice_ang=...) call, which
+                                       # silently mismatches for any run at a different lattice length).
 print(f"{PREFIX}: nchain={nchain} (ndof={ndof}), {nsteps_saved} saved steps")
 
 # ---------------- bond-length distortion from t=0, every bond, every saved step ----------------

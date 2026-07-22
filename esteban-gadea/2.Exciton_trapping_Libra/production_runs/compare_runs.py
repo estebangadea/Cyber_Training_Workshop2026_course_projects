@@ -7,8 +7,6 @@ import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 
-from cis_compute_adi import get_default_params
-
 RUNS = [
     ("run1_unseeded", "Run 1: unseeded exciton (delocalized baseline)", "tab:gray"),
     ("run2_selftrapping", "Run 2: seeded exciton (self-trapping)", "tab:red"),
@@ -25,8 +23,10 @@ def rms_bond_distortion(prefix):
         q = q[:, 0, :]
     nsteps_saved, ndof = q.shape
     nchain = ndof // 2
-    p = get_default_params(nchain=nchain, dimer1=0.086419, lattice_ang=6.0, hartreeu=0.0)
-    boxl = p["boxl"]
+    boxl = nchain * (q[0, 2] - q[0, 0])   # ring circumference, read directly from the t=0 geometry --
+                                           # robust to whatever lattice_ang this run actually used (see
+                                           # analyze_dynamics.py's identical fix for why this replaced
+                                           # a hardcoded get_default_params(lattice_ang=6.0) call).
 
     bonds = np.zeros((nsteps_saved, ndof))
     for k in range(ndof - 1):
