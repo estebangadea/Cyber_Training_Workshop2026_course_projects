@@ -192,6 +192,96 @@ def mo_response(C, eps, dH0, p, degeneracy_tol=1e-8):
     return weight @ C.T                                 # (n_dof, n)
 
 
+def stabilize_eigenbasis(eps, C, H0, C_prev, group_tol):
+    """
+    Fixes a genuine discontinuity in the windowed CIS matrix (cis_compute_adi.py's
+    cis_windowed_energy_and_gradient / exciton_density.cis_windowed_spectrum) caused
+    by np.linalg.eigh's ARBITRARY choice of basis within a near-degenerate group of
+    orbitals -- specifically the HOMO-1/HOMO-2 and LUMO+1/LUMO+2 pairs this ring's
+    residual symmetry keeps close together (exactly degenerate at equilibrium,
+    splitting only ~0.01-0.1 eV once the lattice distorts during self-trapping).
+
+    THE BUG THIS FIXES: eps (eigenvalues) and the pairwise/window-boundary MO
+    spacings all vary smoothly step-to-step even across an observed CIS-energy
+    jump (confirmed by direct numerical investigation on an actual production
+    trajectory) -- but the RAW EIGENVECTORS eigh returns within a near-degenerate
+    group are not required to vary continuously between two very close geometries;
+    a modest, uncontrolled rotation within that 2D (or 3D) subspace is enough to
+    visibly shift Hm's off-diagonal direct/exchange terms (confirmed: the jump was
+    localized EXACTLY to Hm elements connecting a degenerate-pair orbital to the
+    OTHER side's non-degenerate one, e.g. (HOMO-1,LUMO)-(HOMO,LUMO), and nowhere
+    else), producing a discrete jump in the lowest CIS eigenvalue -- and hence in
+    Etot -- even though every eigenvalue-level quantity is smooth throughout.
+
+    THE FIX: rather than accept eigh's independently-chosen basis at every call,
+    align each near-degenerate group with the PREVIOUS step's corresponding
+    orbitals via the orthogonal Procrustes solution (the same idea behind
+    "maximum overlap"/diabatization-by-continuity methods used elsewhere in
+    nonadiabatic dynamics to solve exactly this class of problem) -- this makes
+    the orbital basis change continuously with geometry instead of jumping
+    arbitrarily, without altering any physical trajectory (q, p) or model
+    parameter. Groups of size 1 reduce to a plain sign-continuity fix (a
+    1-dimensional special case of the same Procrustes idea).
+
+    CAVEAT: for a group that is close but not EXACTLY degenerate (the typical
+    case once the lattice distorts), the continuity-aligned combination is no
+    longer an exact eigenvector of H0 -- using it introduces a small, controlled,
+    and now-CONTINUOUS approximation (bounded by the within-group splitting,
+    typically <0.1 eV here) in place of the uncontrolled discontinuous jump this
+    replaces. The eigenvalue used downstream for that orbital is corrected to the
+    Rayleigh quotient of the rotated vector (C^T H0 C), not the original raw eps,
+    to keep the (eps[a]-eps[i]) diagonal term in Hm consistent with the basis
+    actually used to build Dvec.
+
+    Args:
+        eps (n,): eigenvalues from np.linalg.eigh(H0), ascending.
+        C (n,n): corresponding eigenvectors (columns).
+        H0 (n,n): the Hamiltonian eps/C were computed from (needed for the
+            Rayleigh-quotient eigenvalue correction on rotated groups).
+        C_prev (n,n) or None: the previous step's (already-stabilized) C, used as
+            the continuity reference. None (e.g. the first step of a trajectory)
+            is a no-op -- returns eps, C unchanged, since there is nothing to be
+            discontinuous WITH yet.
+        group_tol (float, Ha): eigenvalues within group_tol of their neighbor are
+            chained into the same near-degenerate group. Chosen large enough to
+            span the observed within-pair splitting (~0.01-0.1 eV) but well below
+            the window-boundary spacing to the next group over (~0.15+ eV, per
+            cis_gradient_windowed's docstring) -- see get_default_params'
+            degenerate_group_tol for the production default.
+
+    Returns:
+        (eps_out, C_out): same shapes as eps, C -- eps_out equals eps exactly for
+        untouched/sign-flipped (singleton) orbitals, and the Rayleigh-quotient
+        correction for rotated (multi-member) groups.
+    """
+    if C_prev is None:
+        return eps, C
+    n = len(eps)
+    C_out = C.copy()
+    eps_out = eps.copy()
+    i = 0
+    while i < n:
+        j = i + 1
+        while j < n and (eps[j] - eps[j - 1]) < group_tol:
+            j += 1
+        group = list(range(i, j))
+        if len(group) == 1:
+            k = group[0]
+            if C_prev[:, k] @ C[:, k] < 0.0:
+                C_out[:, k] = -C[:, k]
+            # a pure sign flip changes no eigenvalue -- eps_out[k] already correct
+        else:
+            S = C_prev[:, group].T @ C[:, group]           # overlap matrix, previous vs. current
+            U, _, Vt = np.linalg.svd(S)
+            R = Vt.T @ U.T                                  # orthogonal Procrustes-optimal rotation
+            C_group_new = C[:, group] @ R
+            C_out[:, group] = C_group_new
+            HC_group = H0 @ C_group_new
+            eps_out[group] = np.einsum("ik,ik->k", C_group_new, HC_group)  # Rayleigh quotients
+        i = j
+    return eps_out, C_out
+
+
 def contract3(v1, T, v2):
     """result[k] = v1 . T[k] . v2 for a batch of matrices T (shape (n_dof,n,n)).
     Same quantity as np.einsum('m,kmn,n->k', v1, T, v2), but computed as two

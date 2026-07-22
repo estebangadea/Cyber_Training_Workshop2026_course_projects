@@ -33,6 +33,16 @@
 #     non-degenerate band-edge states -- see cis_gradient.py's mo_response
 #     docstring). enable_coupling=True (below) replaces this identity fallback
 #     with a real time-overlap.
+#   * eps, C = np.linalg.eigh(H0) is passed through cis_gradient.stabilize_
+#     eigenbasis (default on -- params["stabilize_degenerate_basis"]) before use.
+#     Found via direct investigation of an actual production trajectory: eigh's
+#     independently-chosen basis within the HOMO-1/HOMO-2 or LUMO+1/LUMO+2 near-
+#     degenerate pairs is not guaranteed continuous step-to-step, which was
+#     causing a real, discrete jump in Etot (confirmed reproducible from the
+#     exact saved geometry, localized to Hm elements connecting a degenerate-pair
+#     orbital to the OTHER side's non-degenerate one) even though every
+#     eigenvalue-level quantity stayed smooth throughout. Stabilizing against the
+#     previous step's basis (max-overlap/Procrustes) removes the artificial jump.
 #
 # Reuses cis_gradient.py's kernel_with_gradient and mo_response unchanged (both
 # already geometry-agnostic). New in this module: a general-geometry H0_and_dH0
@@ -56,7 +66,7 @@ import util.libutil as comn
 
 import numpy as np
 from cis_exciton import ANGSTROM, ELECTRONVOLT
-from cis_gradient import kernel_with_gradient, mo_response, contract3
+from cis_gradient import kernel_with_gradient, mo_response, contract3, stabilize_eigenbasis
 from cis_time_overlap import ground_exciton_time_overlap, multi_state_time_overlap   # only used
                                                              # when params["enable_coupling"]=True
 
@@ -380,6 +390,21 @@ def cis_compute_adi(q, params, full_id):
 
     H0, dH0 = H0_and_dH0(rion, boxl, hop, hopslope, req)
     eps, C = np.linalg.eigh(H0)
+
+    # Fix a genuine discontinuity in the windowed CIS energy caused by eigh's arbitrary choice of
+    # basis within near-degenerate MO groups (HOMO-1/HOMO-2, LUMO+1/LUMO+2 -- see
+    # cis_gradient.stabilize_eigenbasis's docstring for the full diagnosis: confirmed via direct
+    # investigation of an actual production trajectory that Etot jumps discontinuously step-to-step
+    # even though every eigenvalue-level quantity, including these MOs' own energies, stays smooth).
+    # Enabled by default (default_params below); set params["stabilize_degenerate_basis"]=False to
+    # recover the old (unstabilized) behavior for comparison/debugging.
+    if params.get("stabilize_degenerate_basis", True):
+        group_tol = params.get("degenerate_group_tol", 0.1 * ELECTRONVOLT)
+        params.setdefault("C_prev_stab", {})
+        C_prev = params["C_prev_stab"].get(traj)
+        eps, C = stabilize_eigenbasis(eps, C, H0, C_prev, group_tol)
+        params["C_prev_stab"][traj] = C.copy()
+
     nocc = n // 2
     homo, lumo = nocc - 1, nocc
 
@@ -493,7 +518,9 @@ def cis_compute_adi(q, params, full_id):
 
 def get_default_params(nchain=64, dimer1=0.0868, lattice_ang=6.0,
                         fxcalpha=-2.0 * ELECTRONVOLT, fxcgamma=1.0,
-                        hartreeu=0.0, n_near=3):
+                        hartreeu=0.0, n_near=3,
+                        stabilize_degenerate_basis=True,
+                        degenerate_group_tol=0.1 * ELECTRONVOLT):
     """PRODUCTION parameters for the final report's three nchain=32 runs (delocalized
     baseline, self-trapping, ground-state control) -- the ab-initio-corrected
     Hamiltonian from Objective 1's pySCF re-parametrization (esteban-gadea/
@@ -511,7 +538,16 @@ def get_default_params(nchain=64, dimer1=0.0868, lattice_ang=6.0,
     AgChain.py's own get_default_params (deliberately unchanged, see its docstring).
     n_near defaults to 3 -- the smallest odd window that pulls in a full +-k
     degenerate pair on each side of the gap, giving a genuinely localizable exciton
-    state instead of a single delocalized configuration."""
+    state instead of a single delocalized configuration.
+
+    stabilize_degenerate_basis (default True) and degenerate_group_tol (default
+    0.1 eV) control cis_compute_adi's per-step fix for the near-degenerate-orbital
+    discontinuity documented in cis_gradient.stabilize_eigenbasis's docstring --
+    0.1 eV was chosen empirically: comfortably above the observed HOMO-1/HOMO-2 and
+    LUMO+1/LUMO+2 splitting during self-trapping (~0.01-0.06 eV in the trajectories
+    checked), comfortably below the window-boundary spacing to the next orbital
+    over (~0.15+ eV). Set stabilize_degenerate_basis=False to recover the old,
+    unstabilized behavior for comparison/debugging."""
     hop = -0.668653 * ELECTRONVOLT
     hopslope = 1.150209 * ELECTRONVOLT / ANGSTROM
     req = 3.989152 * ANGSTROM
@@ -526,6 +562,8 @@ def get_default_params(nchain=64, dimer1=0.0868, lattice_ang=6.0,
         "pref": 0.032205, "p": 8,
         "fxcalpha": fxcalpha, "fxcgamma": fxcgamma, "hartreeu": hartreeu,
         "n_near": n_near,
+        "stabilize_degenerate_basis": stabilize_degenerate_basis,
+        "degenerate_group_tol": degenerate_group_tol,
     }
 
 
