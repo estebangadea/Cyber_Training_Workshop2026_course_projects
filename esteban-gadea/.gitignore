@@ -13,3 +13,6 @@ __pycache__/
 2.Exciton_trapping_Libra/production_runs/run2_selftrapping/
 2.Exciton_trapping_Libra/production_runs/run3_control/
 **/mem_data.hdf
+
+# Ad hoc debugging/investigation scripts -- not meant to be tracked
+2.Exciton_trapping_Libra/debug_scripts/
